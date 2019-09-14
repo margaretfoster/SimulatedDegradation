@@ -1,0 +1,243 @@
+## The script takes edgelists and returns csv files.
+##-----------------------------------------------------------------------------------
+##Part 1: Prepares the functions for data processing
+##-----------------------------------------------------------------------------------
+
+#### cutTies.uniform takes an edgelist that has nodeids and identified edge ids (called "edgeid")
+## and uniformly cut the edges for a given % of the graph. Data is organized with edges as unit of analysis
+
+##  requires igraph 
+## Takes edgelist (a dataframe) and the percentage of ties to cut (p)
+## provides option of specifying what seed you want to use
+    
+cutTies.uniform <- function(edgelistdf, p, seed){
+    p <- p
+    assign("df.for.graph", edgelistdf)
+                      
+    ## \\sometimes the edge numbering is messaged up
+    ## \\this step makes sure that the dfs are set up correctly:
+    rownames(edgelistdf) <-  1:nrow(edgelistdf)
+
+    ## \\step 1: convert p into a number of ties to remove.
+    ##\\takes length of edgelistdf and p, returns an integer
+   ## \\ rounds down
+   
+    if((p>1) | (p<0)){print("Check your cupoints, p is less than 0 or greater than 1")}
+    if(p==1){print("p is 1, all ties will be removed. Did you intend this?")}
+   
+    edgelistdf <- df.for.graph
+    assign("cutlength", floor(dim(edgelistdf)[1]*p))
+    print(paste0("cutlength is ", cutlength, " threshold is ", p ))
+
+    ##\\ step 2: list of edges to remove
+    set.seed(seed)
+    assign("random.deletes", sample(1:dim(edgelistdf)[1], cutlength, replace=FALSE))
+    #print(paste0('length of the random delete list is ', length(random.deletes)))
+
+    ## \\step 3: cut out the ties identified by random.deletes
+    assign("graph2", edgelistdf[!rownames(edgelistdf) %in% random.deletes,])
+
+    ## \\step 4: build in a warning if things go wrong with the length:
+    assign("upper", cutlength*1.1)
+    assign("lower", cutlength*.9)
+    if((dim(edgelistdf)[1] - dim(graph2)[1] > upper)|
+       ((dim(edgelistdf)[1] - dim(graph2)[1]<lower)))
+        {print(paste0(
+            "Warning: after cutting edges,
+edgelist is not within 10% of the target,
+ output length is: ", dim(graph2)[1],
+            "target length was ", dim(edgelistdf)[1]- cutlength))}
+   return(graph2)
+}
+
+##evAndComInfo takes a dataframe or matrix that contains an edgelist and cutpoints (as produced by cutTies)
+## produces an igraph structure, extracts structural information
+##returns a list with:
+## entry 1: the igraph data for the   
+##entry #2: the dataframe with percent cut, nodeid, eigenvalue, community affiliation, and degree
+##produces a dataframe with eigenvector, betweeenness values and community identification:
+
+evAndComInfo <- function(graph2, p){
+    assign('graph', igraph::graph.data.frame(graph2, directed=FALSE, vertices=NULL))
+    V(graph)$degree <- igraph::degree(graph)
+    V(graph)$eigen <- igraph::evcent(graph)$vector
+    V(graph)$between <- igraph::betweenness(graph, normalized = TRUE)
+    Coms <- walktrap.community(graph, steps=5)
+    V(graph)$degree <- igraph::degree(graph)
+    V(graph)$com <- Coms$membership
+
+    ## \\send the information out of the igraph:
+    assign("out", as.data.frame(cbind(p, as.numeric(as.character(V(graph)$name)),
+                                      as.numeric(as.character(V(graph)$eigen)),
+                                      as.numeric(as.character(V(graph)$com)),
+                                      as.numeric(as.character(V(graph)$degree)),
+                                      as.numeric(as.character(V(graph)$between)))))
+    # had closeness, but disconnected graph makes it now meaningful
+    colnames(out) <- c('cutPercent','nodeID','eigen','community','degree', 'betweeness')
+ 
+
+   print(paste0("length of out is:", dim(out)[1]))
+   outlist <- list(graph, out)
+   return(outlist)
+}
+
+## loopTheGraph runs k number of steps defined in the parameters for uniform cuts
+##returns a giant dataframe with the eigenvector, degree, community, and betweenness
+##at varying levels of graph data loss
+
+## loopTheGraph is now a container function that calls cutTies.Uniform on the entire
+## edgelist, calls evandComInfo to create network graphs and extract information
+
+## returns a list of dataframes produced by evandComInfo, with one entry per cutpoint
+
+
+loopTheGraph <- function(edgelistdf, cutBy, seed){
+    outlist <- NULL
+    t <- seq(from=0, to=1, by = cutBy)
+    for(i in unique(t)){
+        if(i ==1){return(outlist)} #easier way to sidestep the problem at 1
+        else{
+            assign("tmp", cutTies.uniform(edgelistdf, i, seed))
+            assign("out", evAndComInfo(tmp, i)[[2]])
+       outlist <- rbind(outlist, out)
+    }}    
+    return(outlist)
+}
+
+
+## visualizeComChanges takes the edgelist, sequencing info, random seed,
+## returns the number of pdf graphs that you sequence by, all saved with a file name
+## of the format: uniformcuts_i.pdf.
+
+## visualizeComChanges is used to visualize the effects of the tie cuts
+
+visualizeComChanges <- function(edgelistdf, cutBy, seed, nameTag){
+    outlist <- NULL
+    t <- seq(from=0, to=1, by = cutBy)
+    
+    for(i in unique(t)){
+        if(i ==1){return(outlist)} #easier way to sidestep the problem at 1
+        else{
+            j=i
+            j= j*10 #\\adding j for the saved name because Latex does not like files with . in the name
+            assign("tmp", cutTies.uniform(edgelistdf, i, seed))
+           assign("out", evAndComInfo(tmp, i)[[1]]) ## out is an igraph structure
+            ## simplify - 90s is returning a lot of duplicates:
+            out <- simplify(out, remove.multiple = TRUE, remove.loops = TRUE,
+                            edge.attr.comb = getIgraphOpt("edge.attr.comb"))
+    
+            set.seed(seed)
+            l <- layout.fruchterman.reingold(out,niter=500,
+                                 area=vcount(out)^3.5,
+                                             repulserad=vcount(out)^3.5)
+            pdf(file = paste0(nameTag,"uniformcuts_",j,".pdf"))
+            plot(out,
+                 main=paste0('Graph With Edges Removed At ',i, " Threshold \n" ),
+                 sub='nodes colored by community, cuts are uniform',
+                 layout=l,
+                 vertex.color="lightgray",
+                 vertex.frame.color=V(out)$com,
+                 vertex.label.font=3,
+                 vertex.label=V(out)$name,
+                 vertex.size=7,
+                     vertex.label.cex=.45)
+                 dev.off()
+        }}
+    
+    return(print("EXIT_SUCCESS: Check the graphs"))
+        }
+
+
+visualizeBetweenness <- function(edgelistdf, cutBy, seed, nameTag){
+    outlist <- NULL
+    t <- seq(from=0, to=1, by = cutBy)
+    for(i in unique(t)){
+    if(i ==1){return(outlist)} #easier way to sidestep the problem at 1
+    else{
+       # #\\adding j for the saved name because Latex does not like files with . in the name
+           j=i
+           j= j*100 
+           assign("tmp", cutTies.uniform(edgelistdf, i, seed))
+           assign("out", evAndComInfo(tmp, i)[[1]]) ## out is an igraph structure
+            out <- simplify(out, remove.multiple = TRUE, remove.loops = TRUE,
+                            edge.attr.comb = getIgraphOpt("edge.attr.comb"))
+    
+    
+            set.seed(seed)
+            l <- layout.fruchterman.reingold(out,niter=500,
+                                 area=vcount(out)^4.5,
+                                             repulserad=vcount(out)^3.5)
+            pdf(file = paste0(nameTag,"between_",j,".pdf"))
+            plot(out,
+                 main=paste0('Betweenness Graph With Edges Removed At ',i, " Threshold\n",
+                     j," percent removed"),
+                 sub='nodes colored by community,  cuts are uniform
+ nodes sized by ln(betweenness + 1)',
+                 layout=l,
+                 vertex.color="lightgray",
+                 vertex.frame.color=V(out)$com,
+                 vertex.label.font=3,
+                 vertex.label=V(out)$name,
+                 vertex.size=log(betweenness(out)+ 1),
+                     vertex.label.cex=.45)
+                 dev.off()
+        }}
+    
+    return(print("EXIT_SUCCESS: Check the graphs"))
+        }
+
+
+visualizeEV <- function(edgelistdf, cutBy, seed, nameTag){
+    outlist <- NULL
+    t <- seq(from=0, to=1, by = cutBy)
+    for(i in unique(t)){
+    if(i ==1){return(outlist)} #easier way to sidestep the problem at 1
+        else{
+           j=i
+           j= j*100 #\\adding j for the saved name because Latex does not like files with . in the name
+           assign("tmp", cutTies.uniform(edgelistdf, i, seed))
+           assign("out", evAndComInfo(tmp, i)[[1]]) ## out is an igraph structure
+           out <- simplify(out, remove.multiple = TRUE, remove.loops = TRUE,
+                            edge.attr.comb = getIgraphOpt("edge.attr.comb"))
+    
+  
+            set.seed(seed)
+           l <- layout.fruchterman.reingold(out,niter=500,
+                                 area=vcount(out)^4.5,
+                                             repulserad=vcount(out)^4.5)
+            pdf(file = paste0(nameTag,"evect_",j,".pdf"))
+            plot(out,
+                 main=paste0('EV Graph With Edges Removed At ',i, " Threshold\n",
+                     j," percent removed"),
+                 sub='nodes colored by community,  cuts are uniform
+ nodes sized by ln(eigenvector +1) * 20',
+                 layout=l,
+                 vertex.color="lightgray",
+                 vertex.frame.color=V(out)$com,
+                 vertex.label.font=3,
+                 vertex.label=V(out)$name,
+                 vertex.size=log(V(out)$eigen +1 )*20,
+                     vertex.label.cex=.45)
+                 dev.off()
+        }}
+    
+    return(print("EXIT_SUCCESS: Check the graphs"))
+        }
+
+
+## makeGraphs shows the distribution of eigenvector centrality values for each cut percent.
+
+makeGraphs <- function(data, title){    
+    ggraph <-ggplot(data, aes(x = eigen)) +
+        facet_wrap(~cutPercent) + geom_density() + theme_bw() +
+            ggtitle(title) + xlim(.000000000001,1) +xlab("Values >0")
+    return(ggraph)
+}
+
+makeBetGraphs <- function(data, title){    
+    ggraph <-ggplot(data, aes(x = betweeness)) +
+        facet_wrap(~cutPercent, scales='free') + geom_density() + theme_bw() +
+            ggtitle(title) + xlim(.000000000001, .25) + xlab("Values >0")
+return(ggraph)
+}
+
